@@ -5,11 +5,16 @@ from functools import lru_cache
 # ==============================
 # CONFIGURAÇÃO DO CSV (RAW)
 # ==============================
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/dehgui/decisor-de-rotina/refs/heads/main/activities.csv" 
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/dehgui/decisor-de-rotina/refs/heads/main/activities.csv"
 
 MAX_ENERGY = 5
 MAX_HUNGER = 5
 MAX_EMO = 5
+
+DECAY_FACTOR = 0.7       # decaimento por repetição
+WINDDOWN_PENALTY = 4.0   # penalidade para atividades inadequadas antes de dormir
+WINDDOWN_WINDOW = 2      # últimas 2 horas antes do sono
+
 
 # ==============================
 # CARREGAR ATIVIDADES DO GITHUB
@@ -30,7 +35,7 @@ def clamp(v, lo, hi):
 # ==============================
 # FUNÇÃO DE RECOMPENSA
 # ==============================
-def reward(act, state):
+def base_reward(act, state):
     hour, energy, hunger, emotional, money, env_pref = state
     base = float(act["base_utility"])
     cost = float(act["cost"])
@@ -40,6 +45,7 @@ def reward(act, state):
 
     r = base
 
+    # penalizações
     if energy <= 1 and de < 0:
         r -= 2.5
     if hunger >= 3 and dh >= 0:
@@ -68,38 +74,64 @@ def transition(state, act):
 
 
 # ==============================
-# PROGRAMAÇÃO DINÂMICA (BELLMAN)
+# PROGRAMAÇÃO DINÂMICA (MDP)
+# Agora com:
+# ✔ Decaimento por repetição
+# ✔ Penalização winddown
+# ✔ Histórico prev_idx + consec
 # ==============================
 @lru_cache(maxsize=None)
-def V(hour, energy, hunger, emotional, money, env_pref, sleep_hour):
+def V(hour, energy, hunger, emotional, money, env_pref, sleep_hour, prev_idx, consec):
     if hour >= sleep_hour:
         return (0.0, [])
 
     best_val = -1e9
     best_seq = []
 
-    for act in ACTIVITIES:
+    for i, act in enumerate(ACTIVITIES):
 
+        # janela horária
         earliest = int(act["earliest_hour"])
         latest = int(act["latest_hour"])
-
         if not (earliest <= hour <= latest):
             continue
 
+        # custo
         if float(act["cost"]) > money:
             continue
 
-        r = reward(act, (hour, energy, hunger, emotional, money, env_pref))
+        # recompensa base
+        base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
+
+        # decaimento de repetição
+        if i == prev_idx:
+            r = base_r * (DECAY_FACTOR ** consec)
+        else:
+            r = base_r
+
+        # penalização winddown
+        act_wind = bool(act["winddown"])
+        if hour >= sleep_hour - WINDDOWN_WINDOW and not act_wind:
+            r -= WINDDOWN_PENALTY
+
+        # transição
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
 
-        future_val, future_seq = V(*nt, sleep_hour)
+        # atualização de repetição
+        next_prev = i
+        next_consec = consec + 1 if i == prev_idx else 1
+
+        future_val, future_seq = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
+                                   sleep_hour, next_prev, next_consec)
         total = r + future_val
 
         if total > best_val:
             best_val = total
             best_seq = [(hour, act["name"], r, float(act["cost"]))] + future_seq
 
+    # fallback descansar se nada válido
     if best_val < -1e8:
+        rest_r = 1.0
         rest = {
             "name": "Descansar",
             "delta_energy": +1,
@@ -107,14 +139,11 @@ def V(hour, energy, hunger, emotional, money, env_pref, sleep_hour):
             "base_utility": 1,
             "cost": 0,
             "environment": 1,
-            "earliest_hour": 0,
-            "latest_hour": 23,
         }
-
         nt = transition((hour, energy, hunger, emotional, money, env_pref), rest)
-        future_val, future_seq = V(*nt, sleep_hour)
-
-        return (1.0 + future_val, [(hour, "Descansar", 1.0, 0.0)] + future_seq)
+        future_val, future_seq = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
+                                   sleep_hour, -1, 0)
+        return (rest_r + future_val, [(hour, "Descansar", rest_r, 0.0)] + future_seq)
 
     return (best_val, best_seq)
 
@@ -122,7 +151,7 @@ def V(hour, energy, hunger, emotional, money, env_pref, sleep_hour):
 # ==============================
 # STREAMLIT UI
 # ==============================
-st.title("🔮 DECISOR DE ROTINA — MDP + Programação Dinâmica")
+st.title("🔮 DECISOR DE ROTINA — MDP + Programação Dinâmica (com Decaimento)")
 
 st.sidebar.header("Estado inicial")
 
@@ -140,12 +169,12 @@ env_pref = st.sidebar.radio("Ambiente preferido", [1, 2, 3],
 # Carregar atividades
 ACTIVITIES = load_activities_raw(GITHUB_CSV_URL)
 
-st.write("### Banco de atividades (direto do GitHub)")
+st.write("### Banco de atividades (GitHub RAW)")
 st.write(pd.DataFrame(ACTIVITIES))
 
 if st.button("Gerar rotina ótima"):
     V.cache_clear()
-    val, seq = V(start_hour, energy, hunger, emotional, money, env_pref, sleep_hour)
+    val, seq = V(start_hour, energy, hunger, emotional, money, env_pref, sleep_hour, -1, 0)
 
     st.write(f"## Utilidade total: {val:.2f}")
     st.write("### Rotina sugerida:")
