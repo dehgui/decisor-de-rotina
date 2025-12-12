@@ -6,21 +6,13 @@ import matplotlib.pyplot as plt
 from functools import lru_cache
 from io import BytesIO
 
-# ================================================================
-# CONFIGURAÇÃO BÁSICA DO APP
-# ================================================================
 st.set_page_config(page_title="Decisor de Rotina — Individual", page_icon="🔮", layout="wide")
 
 REPO_OWNER = "dehgui"
 REPO_NAME = "decisor-de-rotina"
 GH_TOKEN = st.secrets.get("GH_TOKEN", None)
 
-# ================================================================
-# FUNÇÕES UTILITÁRIAS PARA ACESSO AO GITHUB VIA API
-# ================================================================
-
 def github_get_file_sha(path):
-    """Retorna o SHA de um arquivo no GitHub (necessário para sobrescrever)."""
     if GH_TOKEN is None:
         return None
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
@@ -30,81 +22,49 @@ def github_get_file_sha(path):
         return r.json().get("sha")
     return None
 
-
 def github_read_csv(path):
-    """Lê um CSV armazenado no GitHub (via API, sem cache)."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GH_TOKEN}"}
     r = requests.get(url, headers=headers)
     if r.status_code != 200:
         return None
-
     content = r.json()["content"]
     decoded = base64.b64decode(content).decode()
     from io import StringIO
     return pd.read_csv(StringIO(decoded))
 
-
 def github_write_csv(path, df, commit_message):
-    """Escreve um CSV no GitHub, sobrescrevendo-o."""
     sha = github_get_file_sha(path)
-    if sha is None and df is None:
-        return False
-
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GH_TOKEN}"}
-
     csv_bytes = df.to_csv(index=False).encode()
     encoded = base64.b64encode(csv_bytes).decode()
-
-    data = {
-        "message": commit_message,
-        "content": encoded,
-        "sha": sha
-    }
-
+    data = {"message": commit_message, "content": encoded, "sha": sha}
     resp = requests.put(url, headers=headers, json=data)
     return resp.status_code in (200, 201)
-
-
-# ================================================================
-# SISTEMA DE USUÁRIOS INDIVIDUAIS
-# ================================================================
 
 st.title("🔮 Decisor de Rotina — Versão Individual por Usuário")
 
 st.markdown("""
-Digite abaixo um **ID pessoal**, simples, sem espaço, como:
-
-- `joao`
-- `maria22`
-- `andre`
-- `profdaniel`
-
-Cada usuário terá seu **próprio banco de atividades**, salvo automaticamente no GitHub.
+Digite seu **ID pessoal** (ex: andre, joao, maria22).
+Cada pessoa terá seu próprio conjunto de atividades.
 """)
 
 user_id = st.text_input("Seu ID pessoal:", placeholder="ex: andre")
-
 if not user_id:
     st.stop()
 
 FILE_PATH = f"data/{user_id}_activities.csv"
 
-# Garante que o CSV do usuário existe
 df_user = github_read_csv(FILE_PATH)
-
 if df_user is None:
     df_user = pd.DataFrame(columns=[
-        "name", "cost", "delta_energy", "delta_hunger",
-        "base_utility", "environment", "earliest_hour",
-        "latest_hour", "winddown"
+        "name","cost","delta_energy","delta_hunger",
+        "base_utility","environment","earliest_hour",
+        "latest_hour","winddown"
     ])
     github_write_csv(FILE_PATH, df_user, f"Criar base do usuário {user_id}")
 
-# ================================================================
-# CARREGADOR FINAL QUE SEMPRE PEGA O CSV MAIS ATUAL
-# ================================================================
 def load_user_activities():
     df = github_read_csv(FILE_PATH)
     if df is None or df.empty:
@@ -115,18 +75,13 @@ def load_user_activities():
         ])
     return df
 
-
-# ================================================================
-# MODELO DO MDP (idêntico, apenas usa df_user)
-# ================================================================
-
 MAX_ENERGY = 5
 MAX_HUNGER = 5
 DECAY_FACTOR = 0.7
 WINDDOWN_PENALTY = 4.0
 WINDDOWN_WINDOW = 2
 
-def clamp(v, lo, hi): 
+def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 def base_reward(act, state):
@@ -136,7 +91,6 @@ def base_reward(act, state):
     de = int(act["delta_energy"])
     dh = int(act["delta_hunger"])
     env = int(act["environment"])
-
     r = base
     if energy <= 1 and de < 0: r -= 2.5
     if hunger >= 3 and dh >= 0: r -= 1.5
@@ -155,12 +109,12 @@ def transition(state, act):
         env
     )
 
-
 @lru_cache(maxsize=None)
 def V(hour, energy, hunger, emotional, money, env_pref,
       sleep_hour, prev_idx, consec,
       mand_idx_tuple, mand_rem_tuple,
-      current_mand_pos, current_mand_consec):
+      current_mand_pos, current_mand_consec,
+      used_flags):
 
     if hour >= sleep_hour:
         return (0.0, []) if all(x == 0 for x in mand_rem_tuple) else (-1e6, [])
@@ -171,38 +125,39 @@ def V(hour, energy, hunger, emotional, money, env_pref,
 
     best_val, best_seq = -1e9, []
 
-    # Bloco obrigatório sendo executado
     if current_mand_pos != -1:
-        i = mand_idx_tuple[current_mand_pos]
-        act = activities[i]
+        idx = mand_idx_tuple[current_mand_pos]
+        act = activities[idx]
         hour_mod = hour % 24
-
         if not (int(act["earliest_hour"]) <= hour_mod <= int(act["latest_hour"])):
             return (-1e6, [])
         if float(act["cost"]) > money:
             return (-1e6, [])
-
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
-        r = base_r * (DECAY_FACTOR ** consec) if i == prev_idx else base_r
+        r = base_r * (DECAY_FACTOR ** consec) if idx == prev_idx else base_r
         if hour >= sleep_hour - WINDDOWN_WINDOW and not eval(str(act["winddown"])):
             r -= WINDDOWN_PENALTY
 
         mand_rem = list(mand_rem_tuple)
         mand_rem[current_mand_pos] -= 1
-
         next_pos = current_mand_pos if mand_rem[current_mand_pos] > 0 else -1
         next_consec = current_mand_consec + 1 if next_pos != -1 else 0
 
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
-        fv, fs = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
-                    sleep_hour, i, next_consec,
-                    mand_idx_tuple, tuple(mand_rem),
-                    next_pos, next_consec)
+        fv, fs = V(
+            nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
+            sleep_hour, idx, next_consec,
+            mand_idx_tuple, tuple(mand_rem),
+            next_pos, next_consec,
+            used_flags
+        )
+        return r + fv, [(hour, act["name"], r, float(act["cost"]))] + fs
 
-        return (r + fv, [(hour, act["name"], r, float(act["cost"]))] + fs)
-
-    # Caso normal
     for i, act in enumerate(activities):
+
+        if used_flags[i] == 1:
+            continue
+
         hour_mod = hour % 24
         if not (int(act["earliest_hour"]) <= hour_mod <= int(act["latest_hour"])):
             continue
@@ -222,36 +177,35 @@ def V(hour, energy, hunger, emotional, money, env_pref,
 
         mand_rem = list(mand_rem_tuple)
         next_pos, next_consec = -1, 0
-
         if is_mand:
-            idx_pos = mand_idx_tuple.index(i)
-            mand_rem[idx_pos] -= 1
-            if mand_rem[idx_pos] > 0:
-                next_pos = idx_pos
+            pos = mand_idx_tuple.index(i)
+            mand_rem[pos] -= 1
+            if mand_rem[pos] > 0:
+                next_pos = pos
                 next_consec = 1
 
+        new_used = list(used_flags)
+        if prev_idx != -1 and i != prev_idx:
+            new_used[prev_idx] = 1
+
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
-        fv, fs = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
-                    sleep_hour, i, (consec+1 if i==prev_idx else 1),
-                    mand_idx_tuple, tuple(mand_rem),
-                    next_pos, next_consec)
+        fv, fs = V(
+            nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
+            sleep_hour, i, (consec+1 if i==prev_idx else 1),
+            mand_idx_tuple, tuple(mand_rem),
+            next_pos, next_consec,
+            tuple(new_used)
+        )
 
         total = r + fv
         if total > best_val:
             best_val = total
             best_seq = [(hour, act["name"], r, float(act["cost"]))] + fs
 
-    return (best_val, best_seq)
-
-# ================================================================
-# INTERFACE DO APP — TABS
-# ================================================================
+    return best_val, best_seq
 
 tabs = st.tabs(["📅 Gerar planejamento", "🛠 Gerenciar atividades", "📋 Minhas atividades"])
 
-# ================================================================
-# TAB 1 — GERAR PLANEJAMENTO
-# ================================================================
 with tabs[0]:
 
     df = load_user_activities()
@@ -260,14 +214,11 @@ with tabs[0]:
     st.header("Defina seu estado atual")
 
     col1, col2, col3 = st.columns(3)
-
     with col1:
         start_hour = st.number_input("Hora atual (0–23)", 0, 23, 9)
         sleep_hour = st.number_input("Hora de dormir (0–23)", 0, 23, 23)
         sleep_eff = sleep_hour + 24 if sleep_hour <= start_hour else sleep_hour
-        env_pref = st.selectbox("Ambiente preferido",
-                                (1,2,3),
-                                format_func=lambda x: {1:"Dentro",2:"Fora",3:"Tanto faz"}[x])
+        env_pref = st.selectbox("Ambiente preferido", (1,2,3))
 
     with col2:
         energy = st.slider("Energia (0–5)", 0, 5, 3)
@@ -278,6 +229,7 @@ with tabs[0]:
         money = st.number_input("Dinheiro disponível (R$)", 0.0, 2000.0, 50.0)
 
     st.subheader("Atividades obrigatórias (blocos contínuos)")
+
     mand_names = df["name"].tolist()
     selected_mand = st.multiselect("Escolher atividades obrigatórias", mand_names)
 
@@ -286,8 +238,8 @@ with tabs[0]:
         mand_hours[name] = st.number_input(f"Horas contínuas para {name}", 1, 24, 1)
 
     if st.button("✨ Gerar planejamento ótimo"):
-        mand_idx, mand_rem = [], []
 
+        mand_idx, mand_rem = [], []
         for n, hrs in mand_hours.items():
             i = next((i for i,a in enumerate(ACTIVITIES) if a["name"]==n), None)
             if i is not None:
@@ -295,10 +247,15 @@ with tabs[0]:
                 mand_rem.append(hrs)
 
         V.cache_clear()
-        total, seq = V(start_hour, energy, hunger, emotional, money, env_pref,
-                       sleep_eff, -1, 0,
-                       tuple(mand_idx), tuple(mand_rem),
-                       -1, 0)
+
+        total, seq = V(
+            start_hour, energy, hunger, emotional, money, env_pref,
+            sleep_eff, 
+            -1, 0,
+            tuple(mand_idx), tuple(mand_rem),
+            -1, 0,
+            tuple([0] * len(ACTIVITIES))
+        )
 
         if total < -1e5:
             st.error("Não foi possível montar o planejamento.")
@@ -307,10 +264,6 @@ with tabs[0]:
             for h, n, r, c in seq:
                 st.write(f"{h}:00 → {n} (U={r:.2f}, R${c:.2f})")
 
-
-# ================================================================
-# TAB 2 — CADASTRAR/REMOVER ATIVIDADES
-# ================================================================
 with tabs[1]:
 
     st.header("Cadastrar nova atividade")
@@ -357,20 +310,14 @@ with tabs[1]:
             else:
                 st.error("Erro ao gravar no GitHub.")
 
-
-# ================================================================
-# TAB 3 — LISTAR
-# ================================================================
 with tabs[2]:
-
     st.header("Minhas atividades")
-
     df = load_user_activities()
+
     if df.empty:
         st.info("Nenhuma atividade cadastrada.")
     else:
         df_show = df.copy()
         df_show["environment"] = df_show["environment"].map({1:"Dentro",2:"Fora",3:"Tanto faz"})
         df_show["winddown"] = df_show["winddown"].apply(lambda x: "✔" if str(x).lower()=="true" else "")
-
         st.dataframe(df_show, use_container_width=True)
