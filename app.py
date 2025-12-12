@@ -2,23 +2,23 @@ import streamlit as st
 import pandas as pd
 from functools import lru_cache
 
-# ==============================
+# ======================================
 # CONFIGURAÇÃO DO CSV (RAW)
-# ==============================
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/dehgui/decisor-de-rotina/refs/heads/main/activities.csv"
+# ======================================
+GITHUB_CSV_URL = "RAW_URL_AQUI"   # <-- COLE AQUI O LINK RAW DO CSV
 
 MAX_ENERGY = 5
 MAX_HUNGER = 5
 MAX_EMO = 5
 
-DECAY_FACTOR = 0.7       # decaimento por repetição
-WINDDOWN_PENALTY = 4.0   # penalidade para atividades inadequadas antes de dormir
-WINDDOWN_WINDOW = 2      # últimas 2 horas antes do sono
+DECAY_FACTOR = 0.7        # decaimento quando repete atividade
+WINDDOWN_PENALTY = 4.0    # penalidade para atividades inadequadas à noite
+WINDDOWN_WINDOW = 2       # últimas 2h antes do sono
 
 
-# ==============================
+# ======================================
 # CARREGAR ATIVIDADES DO GITHUB
-# ==============================
+# ======================================
 def load_activities_raw(url):
     try:
         df = pd.read_csv(url)
@@ -32,11 +32,12 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-# ==============================
-# FUNÇÃO DE RECOMPENSA
-# ==============================
+# ======================================
+# RECOMPENSA BASE
+# ======================================
 def base_reward(act, state):
     hour, energy, hunger, emotional, money, env_pref = state
+
     base = float(act["base_utility"])
     cost = float(act["cost"])
     de = int(act["delta_energy"])
@@ -45,22 +46,28 @@ def base_reward(act, state):
 
     r = base
 
-    # penalizações
+    # penalização energia baixa + atividade que consome energia
     if energy <= 1 and de < 0:
         r -= 2.5
+
+    # fome alta e atividade não ajuda
     if hunger >= 3 and dh >= 0:
         r -= 1.5
+
+    # custo excede dinheiro
     if cost > money:
         r -= (cost - money) / 50 + 5.0
+
+    # ambiente incompatível
     if env_pref != 3 and env != 3 and env != env_pref:
         r -= 1.5
 
     return r
 
 
-# ==============================
+# ======================================
 # TRANSIÇÃO DE ESTADO (MDP)
-# ==============================
+# ======================================
 def transition(state, act):
     hour, energy, hunger, emotional, money, env_pref = state
 
@@ -73,13 +80,12 @@ def transition(state, act):
     return (new_hour, new_energy, new_hunger, new_emotional, new_money, env_pref)
 
 
-# ==============================
-# PROGRAMAÇÃO DINÂMICA (MDP)
+# ======================================
+# PROGRAMAÇÃO DINÂMICA (BELLMAN)
 # Agora com:
 # ✔ Decaimento por repetição
-# ✔ Penalização winddown
-# ✔ Histórico prev_idx + consec
-# ==============================
+# ✔ Identificação de winddown
+# ======================================
 @lru_cache(maxsize=None)
 def V(hour, energy, hunger, emotional, money, env_pref, sleep_hour, prev_idx, consec):
     if hour >= sleep_hour:
@@ -96,62 +102,63 @@ def V(hour, energy, hunger, emotional, money, env_pref, sleep_hour, prev_idx, co
         if not (earliest <= hour <= latest):
             continue
 
-        # custo
+        # custo compatível
         if float(act["cost"]) > money:
             continue
 
         # recompensa base
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
 
-        # decaimento de repetição
+        # decaimento por repetição
         if i == prev_idx:
             r = base_r * (DECAY_FACTOR ** consec)
         else:
             r = base_r
 
-        # penalização winddown
-        act_wind = bool(act["winddown"])
+        # conversão segura da coluna winddown
+        act_wind = str(act.get("winddown", "False")).strip().lower() == "true"
+
+        # penalização para atividades inadequadas perto do sono
         if hour >= sleep_hour - WINDDOWN_WINDOW and not act_wind:
             r -= WINDDOWN_PENALTY
 
-        # transição
+        # transição de estado
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
 
-        # atualização de repetição
+        # atualização do histórico de repetição
         next_prev = i
         next_consec = consec + 1 if i == prev_idx else 1
 
-        future_val, future_seq = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
-                                   sleep_hour, next_prev, next_consec)
+        # chamada recursiva PD
+        future_val, future_seq = V(
+            nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
+            sleep_hour, next_prev, next_consec
+        )
+
         total = r + future_val
 
         if total > best_val:
             best_val = total
             best_seq = [(hour, act["name"], r, float(act["cost"]))] + future_seq
 
-    # fallback descansar se nada válido
+    # fallback — descansar
     if best_val < -1e8:
         rest_r = 1.0
-        rest = {
-            "name": "Descansar",
-            "delta_energy": +1,
+        nt = transition((hour, energy, hunger, emotional, money, env_pref), {
+            "delta_energy": 1,
             "delta_hunger": 0,
-            "base_utility": 1,
-            "cost": 0,
-            "environment": 1,
-        }
-        nt = transition((hour, energy, hunger, emotional, money, env_pref), rest)
-        future_val, future_seq = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
-                                   sleep_hour, -1, 0)
+            "cost": 0
+        })
+        future_val, future_seq = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5], sleep_hour, -1, 0)
         return (rest_r + future_val, [(hour, "Descansar", rest_r, 0.0)] + future_seq)
 
     return (best_val, best_seq)
 
 
-# ==============================
+# ======================================
 # STREAMLIT UI
-# ==============================
-st.title("🔮 DECISOR DE ROTINA — MDP + Programação Dinâmica (com Decaimento)")
+# ======================================
+st.title("🔮 DECISOR DE ROTINA — MDP + Programação Dinâmica")
 
 st.sidebar.header("Estado inicial")
 
