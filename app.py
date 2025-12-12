@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 REPO_OWNER = "dehgui"
 REPO_NAME = "decisor-de-rotina"
 FILE_PATH = "activities.csv"
-RAW_CSV_URL = f"https://raw.githubusercontent.com/dehgui/decisor-de-rotina/refs/heads/main/activities.csv"
+RAW_CSV_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/refs/heads/main/{FILE_PATH}"
 GH_TOKEN = st.secrets.get("GH_TOKEN", None)
 
 def get_file_sha():
@@ -35,18 +35,20 @@ def update_github_csv(new_content, commit_message="Atualização automática"):
     resp = requests.put(url, headers=headers, json=data)
     return resp.status_code in (200, 201)
 
-@st.cache_data(ttl=60)
+@st.cache_data
 def load_activities_df():
     try:
         df = pd.read_csv(RAW_CSV_URL)
     except:
         df = pd.DataFrame(columns=[
-            "name","cost","delta_energy","delta_hunger","base_utility",
-            "environment","earliest_hour","latest_hour","winddown"
+            "name","cost","delta_energy","delta_hunger",
+            "base_utility","environment","earliest_hour",
+            "latest_hour","winddown"
         ])
     expected = [
-        "name","cost","delta_energy","delta_hunger","base_utility",
-        "environment","earliest_hour","latest_hour","winddown"
+        "name","cost","delta_energy","delta_hunger",
+        "base_utility","environment","earliest_hour",
+        "latest_hour","winddown"
     ]
     for c in expected:
         if c not in df.columns:
@@ -64,14 +66,11 @@ def clamp(v, lo, hi):
 
 def base_reward(act, state):
     hour, energy, hunger, emotional, money, env_pref = state
-    try:
-        base = float(act.get("base_utility", 0))
-        cost = float(act.get("cost", 0))
-        de = int(act.get("delta_energy", 0))
-        dh = int(act.get("delta_hunger", 0))
-        env = int(act.get("environment", 3))
-    except:
-        return -999
+    base = float(act.get("base_utility", 0))
+    cost = float(act.get("cost", 0))
+    de = int(act.get("delta_energy", 0))
+    dh = int(act.get("delta_hunger", 0))
+    env = int(act.get("environment", 3))
     r = base
     if energy <= 1 and de < 0:
         r -= 2.5
@@ -113,43 +112,35 @@ def V(hour, energy, hunger, emotional, money, env_pref,
         i = mand_idx_tuple[current_mand_pos]
         act = activities[i]
         hour_mod = hour % 24
-        e0 = int(act.get("earliest_hour", 0))
-        e1 = int(act.get("latest_hour", 23))
+        e0 = int(act["earliest_hour"])
+        e1 = int(act["latest_hour"])
         if not (e0 <= hour_mod <= e1):
             return (-1e6, [])
-        if float(act.get("cost", 0)) > money:
+        if float(act["cost"]) > money:
             return (-1e6, [])
-
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
         r = base_r * (DECAY_FACTOR ** consec) if i == prev_idx else base_r
-        act_wind = str(act.get("winddown","")).lower() == "true"
+        act_wind = str(act["winddown"]).lower() == "true"
         if hour >= sleep_hour - WINDDOWN_WINDOW and not act_wind:
             r -= WINDDOWN_PENALTY
-
         mand_rem = list(mand_rem_tuple)
         mand_rem[current_mand_pos] -= 1
-
         next_pos = current_mand_pos if mand_rem[current_mand_pos] > 0 else -1
         next_consec = current_mand_consec + 1 if next_pos != -1 else 0
-
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
         fv, fs = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
                     sleep_hour, i, next_consec,
                     mand_idx_tuple, tuple(mand_rem),
                     next_pos, next_consec)
-
         return (r + fv, [(hour, act["name"], r, float(act["cost"]))] + fs)
 
     for i, act in enumerate(activities):
         hour_mod = hour % 24
-        try:
-            e0 = int(act.get("earliest_hour", 0))
-            e1 = int(act.get("latest_hour", 23))
-        except:
-            e0, e1 = 0, 23
+        e0 = int(act["earliest_hour"])
+        e1 = int(act["latest_hour"])
         if not (e0 <= hour_mod <= e1):
             continue
-        if float(act.get("cost", 0)) > money:
+        if float(act["cost"]) > money:
             continue
 
         is_mand = False
@@ -167,7 +158,7 @@ def V(hour, energy, hunger, emotional, money, env_pref,
 
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
         r = base_r * (DECAY_FACTOR ** consec) if i == prev_idx else base_r
-        act_wind = str(act.get("winddown","")).lower() == "true"
+        act_wind = str(act["winddown"]).lower() == "true"
         if hour >= sleep_hour - WINDDOWN_WINDOW and not act_wind:
             r -= WINDDOWN_PENALTY
 
@@ -187,9 +178,9 @@ def V(hour, energy, hunger, emotional, money, env_pref,
                     mand_idx_tuple, tuple(mand_rem),
                     next_pos, next_consec)
 
-        total = r + fv
-        if total > best_val:
-            best_val = total
+        s = r + fv
+        if s > best_val:
+            best_val = s
             best_seq = [(hour, act["name"], r, float(act["cost"]))] + fs
 
     return (best_val, best_seq)
@@ -247,14 +238,6 @@ def make_pdf_bytes(title, seq, total_util):
 
 st.set_page_config(page_title="Decisor de Rotina", layout="wide", page_icon="🔮")
 
-st.markdown("""
-<style>
-body { background: #0b1220; color: #ffffff; }
-h1,h2,h3 { color: #ffd1e8; }
-.stButton>button { background:#ff6fa3; color:white; border-radius:8px; }
-</style>
-""", unsafe_allow_html=True)
-
 st.title("🔮 DECISOR DE ROTINA — Planejamento Diário")
 
 tabs = st.tabs(["📅 Gerar planejamento", "🛠 Gerenciar atividades", "📋 Atividades cadastradas"])
@@ -269,125 +252,3 @@ with tabs[0]:
         env_pref = st.selectbox("Ambiente preferido", (1,2,3),
                                 format_func=lambda x: {1:"Dentro",2:"Fora",3:"Tanto faz"}[x])
     with col2:
-        energy = st.slider("Energia (0-5)", 0, 5, 3)
-        hunger = st.slider("Fome (0-5)", 0, 5, 2)
-    with col3:
-        emotional = st.slider("Estado emocional (0-5)", 0, 5, 3)
-        money = st.number_input("Dinheiro disponível (R$)", 0.0, 2000.0, 50.0)
-
-    st.markdown("---")
-    st.subheader("Atividades obrigatórias (blocos contínuos)")
-
-    df_act = load_activities_df()
-    ACTIVITIES_LIST = df_act.to_dict(orient="records")
-
-    mand_selected = st.multiselect("Selecione atividades obrigatórias", df_act["name"].tolist())
-
-    mand_hours = {}
-    for n in mand_selected:
-        mand_hours[n] = st.number_input(
-            f"Horas contínuas mínimas para '{n}'",
-            min_value=1, max_value=24, value=1, key=f"mand_{n}"
-        )
-
-    if st.button("✨ Gerar planejamento ótimo"):
-        mand_idx = []
-        mand_rem = []
-        for name, hours in mand_hours.items():
-            idx = next((i for i,a in enumerate(ACTIVITIES_LIST) if a["name"] == name), None)
-            if idx is not None:
-                mand_idx.append(idx)
-                mand_rem.append(hours)
-
-        mand_idx_tuple = tuple(mand_idx)
-        mand_rem_tuple = tuple(mand_rem)
-
-        V.cache_clear()
-        total, seq = V(
-            start_hour, energy, hunger, emotional, money, env_pref,
-            sleep_eff, -1, 0,
-            mand_idx_tuple, mand_rem_tuple,
-            -1, 0
-        )
-
-        if total < -1e5 or not seq:
-            st.error("Não foi possível gerar um planejamento com essas restrições.")
-        else:
-            st.subheader(f"Utilidade total: {total:.2f}")
-            for h, n, r, c in seq:
-                st.write(f"- {h}:00 → {n} (U {r:.2f}, R${c:.2f})")
-            fig = plot_states(seq, start_hour, sleep_eff,
-                              (start_hour, energy, hunger, emotional, money, env_pref))
-            st.pyplot(fig)
-            content, mime, fname = make_pdf_bytes("Planejamento Diário", seq, total)
-            st.download_button("📥 Baixar planejamento", content, file_name=fname, mime=mime)
-
-with tabs[1]:
-    st.header("Cadastrar nova atividade")
-
-    name = st.text_input("Nome")
-    cost = st.number_input("Custo (R$)", 0.0, 2000.0, 0.0)
-    delta_energy = st.number_input("Variação de energia (−5 a 5)", -5, 5, 0)
-    delta_hunger = st.number_input("Variação de fome (−5 a 5)", -5, 5, 0)
-    base_utility = st.number_input("Utilidade base (1-10)", 1, 10, 5)
-    environment = st.selectbox(
-        "Ambiente", (1,2,3),
-        format_func=lambda x: {1:"Dentro",2:"Fora",3:"Tanto faz"}[x]
-    )
-    earliest_hour = st.number_input("Primeira hora possível (0-23)", 0, 23, 6)
-    latest_hour = st.number_input("Última hora possível (0-23)", 0, 23, 22)
-    winddown = st.radio("Adequada para final do dia?", (True, False), index=1)
-
-    if st.button("Cadastrar atividade"):
-        if not name.strip():
-            st.warning("Nome é obrigatório.")
-        else:
-            df = load_activities_df()
-            df.loc[len(df)] = [
-                name, cost, delta_energy, delta_hunger, base_utility,
-                environment, earliest_hour, latest_hour, str(winddown)
-            ]
-            ok = update_github_csv(df.to_csv(index=False),
-                                   commit_message=f"Adicionar atividade: {name}")
-            if ok:
-                st.success("Atividade cadastrada!")
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error("Erro ao atualizar GitHub.")
-
-    st.markdown("---")
-    st.header("Remover atividade")
-
-    df_rem = load_activities_df()
-    if not df_rem.empty:
-        choice = st.selectbox("Escolha a atividade", df_rem["name"].tolist())
-        if st.button("Remover"):
-            new_df = df_rem[df_rem["name"] != choice]
-            ok = update_github_csv(new_df.to_csv(index=False),
-                                   commit_message=f"Remover atividade: {choice}")
-            if ok:
-                st.success("Atividade removida!")
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error("Falha ao remover.")
-    else:
-        st.info("Nenhuma atividade cadastrada.")
-
-with tabs[2]:
-    st.header("Atividades cadastradas")
-    df_all = load_activities_df()
-    if df_all.empty:
-        st.info("Nenhuma atividade.")
-    else:
-        def env_label(v):
-            try: v=int(v)
-            except: v=3
-            return {1:"🏠 Dentro", 2:"🌳 Fora", 3:"💫 Tanto faz"}[v]
-        df_show = df_all.copy()
-        df_show["environment"] = df_show["environment"].apply(env_label)
-        df_show["winddown"] = df_show["winddown"].apply(
-            lambda x: "✅" if str(x).lower()=="true" else ""
-        )
-        st.dataframe(df_show, use_container_width=True)
