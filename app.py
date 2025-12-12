@@ -11,24 +11,11 @@ from datetime import datetime
 # ---------------------------
 # CONFIG GITHUB / CSV RAW
 # ---------------------------
-st.write("DEBUG_TOKEN_PRESENT:", GH_TOKEN is not None)
-sha = get_file_sha()
-st.write("DEBUG_SHA:", sha)
-
 REPO_OWNER = "dehgui"
 REPO_NAME = "decisor-de-rotina"
 FILE_PATH = "activities.csv"
 RAW_CSV_URL = f"https://raw.githubusercontent.com/dehgui/decisor-de-rotina/refs/heads/main/activities.csv"
 GH_TOKEN = st.secrets.get("GH_TOKEN", None)
-
-# ---------------------------
-# MODELO / PARÂMETROS
-# ---------------------------
-MAX_ENERGY = 5
-MAX_HUNGER = 5
-DECAY_FACTOR = 0.7
-WINDDOWN_PENALTY = 4.0
-WINDDOWN_WINDOW = 2
 
 # ---------------------------
 # UTIL GITHUB
@@ -74,6 +61,13 @@ def update_github_csv(new_content, commit_message="Atualização automática pel
     st.write("Response:", resp.text)
 
     return resp.status_code in (200, 201)
+
+# ---------------------------
+# DEBUG TEMPORÁRIO
+# ---------------------------
+st.write("DEBUG_TOKEN_PRESENT:", GH_TOKEN is not None)
+st.write("DEBUG_SHA:", get_file_sha())
+
 
 
 # ---------------------------
