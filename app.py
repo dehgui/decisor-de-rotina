@@ -11,6 +11,10 @@ from datetime import datetime
 # ---------------------------
 # CONFIG GITHUB / CSV RAW
 # ---------------------------
+st.write("DEBUG_TOKEN_PRESENT:", GH_TOKEN is not None)
+sha = get_file_sha()
+st.write("DEBUG_SHA:", sha)
+
 REPO_OWNER = "dehgui"
 REPO_NAME = "decisor-de-rotina"
 FILE_PATH = "activities.csv"
@@ -40,17 +44,37 @@ def get_file_sha():
     return None
 
 def update_github_csv(new_content, commit_message="Atualização automática pelo app"):
+    st.write("==== DEBUG update_github_csv ====")
+
     if GH_TOKEN is None:
+        st.write("ERRO: GH_TOKEN é None!")
         return False
+
     sha = get_file_sha()
+    st.write("SHA obtido:", sha)
+
     if sha is None:
+        st.write("ERRO: Não foi possível obter o SHA.")
         return False
+
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GH_TOKEN}"}
+
     encoded = base64.b64encode(new_content.encode()).decode()
-    payload = {"message": commit_message, "content": encoded, "sha": sha}
-    resp = requests.put(url, headers=headers, json=payload)
+
+    data = {
+        "message": commit_message,
+        "content": encoded,
+        "sha": sha
+    }
+
+    resp = requests.put(url, headers=headers, json=data)
+
+    st.write("Status code:", resp.status_code)
+    st.write("Response:", resp.text)
+
     return resp.status_code in (200, 201)
+
 
 # ---------------------------
 # CARREGAR ACTIVITIES CSV
