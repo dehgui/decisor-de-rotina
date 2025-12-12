@@ -46,7 +46,7 @@ def github_write_csv(path, df, commit_message):
 st.title("🔮 Decisor de Rotina — Versão Individual por Usuário")
 
 st.markdown("""
-Digite seu **ID pessoal** (ex: andre, joao, maria22).
+Digite seu **ID pessoal** (ex: andre, joao, maria22).  
 Cada pessoa terá seu próprio conjunto de atividades.
 """)
 
@@ -61,7 +61,7 @@ if df_user is None:
     df_user = pd.DataFrame(columns=[
         "name","cost","delta_energy","delta_hunger",
         "base_utility","environment","earliest_hour",
-        "latest_hour","winddown"
+        "latest_hour","winddown","max_hours"
     ])
     github_write_csv(FILE_PATH, df_user, f"Criar base do usuário {user_id}")
 
@@ -71,7 +71,7 @@ def load_user_activities():
         return pd.DataFrame(columns=[
             "name","cost","delta_energy","delta_hunger",
             "base_utility","environment","earliest_hour",
-            "latest_hour","winddown"
+            "latest_hour","winddown","max_hours"
         ])
     return df
 
@@ -114,7 +114,7 @@ def V(hour, energy, hunger, emotional, money, env_pref,
       sleep_hour, prev_idx, consec,
       mand_idx_tuple, mand_rem_tuple,
       current_mand_pos, current_mand_consec,
-      used_flags):
+      usage_counts):
 
     if hour >= sleep_hour:
         return (0.0, []) if all(x == 0 for x in mand_rem_tuple) else (-1e6, [])
@@ -125,14 +125,20 @@ def V(hour, energy, hunger, emotional, money, env_pref,
 
     best_val, best_seq = -1e9, []
 
+    # BLOCO OBRIGATÓRIO ATIVO
     if current_mand_pos != -1:
         idx = mand_idx_tuple[current_mand_pos]
         act = activities[idx]
+
+        if usage_counts[idx] >= int(act["max_hours"]):
+            return (-1e6, [])
+
         hour_mod = hour % 24
         if not (int(act["earliest_hour"]) <= hour_mod <= int(act["latest_hour"])):
             return (-1e6, [])
         if float(act["cost"]) > money:
             return (-1e6, [])
+
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
         r = base_r * (DECAY_FACTOR ** consec) if idx == prev_idx else base_r
         if hour >= sleep_hour - WINDDOWN_WINDOW and not eval(str(act["winddown"])):
@@ -143,19 +149,23 @@ def V(hour, energy, hunger, emotional, money, env_pref,
         next_pos = current_mand_pos if mand_rem[current_mand_pos] > 0 else -1
         next_consec = current_mand_consec + 1 if next_pos != -1 else 0
 
+        new_usage = list(usage_counts)
+        new_usage[idx] += 1
+
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
         fv, fs = V(
             nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
             sleep_hour, idx, next_consec,
             mand_idx_tuple, tuple(mand_rem),
             next_pos, next_consec,
-            used_flags
+            tuple(new_usage)
         )
         return r + fv, [(hour, act["name"], r, float(act["cost"]))] + fs
 
+    # CASO GERAL
     for i, act in enumerate(activities):
 
-        if used_flags[i] == 1:
+        if usage_counts[i] >= int(act["max_hours"]):
             continue
 
         hour_mod = hour % 24
@@ -184,9 +194,8 @@ def V(hour, energy, hunger, emotional, money, env_pref,
                 next_pos = pos
                 next_consec = 1
 
-        new_used = list(used_flags)
-        if prev_idx != -1 and i != prev_idx:
-            new_used[prev_idx] = 1
+        new_usage = list(usage_counts)
+        new_usage[i] += 1
 
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
         fv, fs = V(
@@ -194,7 +203,7 @@ def V(hour, energy, hunger, emotional, money, env_pref,
             sleep_hour, i, (consec+1 if i==prev_idx else 1),
             mand_idx_tuple, tuple(mand_rem),
             next_pos, next_consec,
-            tuple(new_used)
+            tuple(new_usage)
         )
 
         total = r + fv
@@ -277,13 +286,14 @@ with tabs[1]:
     earliest_hour = st.number_input("Primeira hora possível", 0, 23, 6)
     latest_hour = st.number_input("Última hora possível", 0, 23, 22)
     winddown = st.radio("Boa para o fim do dia?", (True, False))
+    max_hours = st.number_input("Máximo de horas por dia", 1, 24, 1)
 
     if st.button("Cadastrar"):
         df = load_user_activities()
         df.loc[len(df)] = [
             name, cost, delta_energy, delta_hunger,
             base_utility, environment, earliest_hour,
-            latest_hour, winddown
+            latest_hour, winddown, max_hours
         ]
         ok = github_write_csv(FILE_PATH, df, f"{user_id}: adicionar atividade {name}")
         if ok:
