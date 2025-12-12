@@ -5,7 +5,7 @@ from functools import lru_cache
 # ======================================
 # CONFIGURAÇÃO DO CSV (RAW)
 # ======================================
-GITHUB_CSV_URL = "RAW_URL_AQUI"   # <-- COLE AQUI O LINK RAW DO CSV
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/dehgui/decisor-de-rotina/refs/heads/main/activities.csv"
 
 MAX_ENERGY = 5
 MAX_HUNGER = 5
