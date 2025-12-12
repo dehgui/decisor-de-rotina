@@ -1,11 +1,11 @@
-name,cost,delta_energy,delta_hunger,base_utility,environment,earliest_hour,latest_hour
-Estudar,0,-2,1,8,1,6,22
-Ir ao cinema,30,-1,0,7,2,12,22
-Almoço leve,20,1,-3,6,2,11,15
-Jantar leve,25,1,-3,7,2,17,22
-Caminhar,0,-1,1,6,2,6,20
-Correr,0,-3,1,7,2,6,20
-Descansar,0,2,0,4,1,0,23
-Ler um livro,0,-1,0,6,1,6,23
-Café da manhã,15,1,-2,7,1,6,10
-Meditar,0,1,0,5,1,6,23
+name,cost,delta_energy,delta_hunger,base_utility,environment,earliest_hour,latest_hour,winddown
+Estudar,0,-2,1,8,1,6,22,False
+Ir ao cinema,30,-1,0,7,2,12,22,False
+Almoçar leve,20,1,-3,6,2,11,15,False
+Jantar leve,25,1,-3,7,2,17,22,True
+Caminhar,0,-1,1,6,2,6,20,False
+Correr,0,-3,1,7,2,6,20,False
+Descansar,0,2,0,4,1,0,23,True
+Ler um livro,0,-1,0,6,1,6,23,True
+Café da manhã,15,1,-2,7,1,6,10,False
+Meditar,0,1,0,5,1,6,23,True
