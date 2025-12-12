@@ -1,3 +1,13 @@
+# ============================================================
+# DECISOR DE ROTINA — Planejamento Diário (MDP + Programação Dinâmica)
+# Esta versão inclui:
+#  - Obrigatórias contínuas
+#  - Suporte a atividades após a meia-noite
+#  - CRUD completo com GitHub
+#  - Cache inteligente + reset após updates
+#  - Comentários apenas para funções importantes
+# ============================================================
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -6,54 +16,74 @@ from functools import lru_cache
 from io import BytesIO
 import matplotlib.pyplot as plt
 
+# ---------------------------
+# CONFIGURAÇÕES DO REPOSITÓRIO
+# ---------------------------
 REPO_OWNER = "dehgui"
 REPO_NAME = "decisor-de-rotina"
 FILE_PATH = "activities.csv"
-RAW_CSV_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/refs/heads/main/{FILE_PATH}"
+RAW_CSV_URL = f"https://raw.githubusercontent.com/dehgui/decisor-de-rotina/refs/heads/main/activities.csv"
 GH_TOKEN = st.secrets.get("GH_TOKEN", None)
 
+# ============================================================
+# 🔧 Funções utilitárias de comunicação com o GitHub
+# ============================================================
+
 def get_file_sha():
+    """
+    Obtém o SHA atual do arquivo no GitHub.
+    Necessário para sobrescrever arquivos via API.
+    """
     if GH_TOKEN is None:
         return None
+
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GH_TOKEN}"}
+
     r = requests.get(url, headers=headers)
     if r.status_code == 200:
         return r.json().get("sha")
     return None
 
+
 def update_github_csv(new_content, commit_message="Atualização automática"):
+    """
+    Envia uma atualização do CSV para o GitHub via API.
+    """
     if GH_TOKEN is None:
         return False
+
     sha = get_file_sha()
     if sha is None:
         return False
+
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GH_TOKEN}"}
+
     encoded = base64.b64encode(new_content.encode()).decode()
     data = {"message": commit_message, "content": encoded, "sha": sha}
+
     resp = requests.put(url, headers=headers, json=data)
     return resp.status_code in (200, 201)
 
-@st.cache_data
+
+# ============================================================
+# 🔄 Carregamento do CSV com CACHE
+# ============================================================
+
+@st.cache_data(ttl=1)
 def load_activities_df():
-    try:
-        df = pd.read_csv(RAW_CSV_URL)
-    except:
-        df = pd.DataFrame(columns=[
-            "name","cost","delta_energy","delta_hunger",
-            "base_utility","environment","earliest_hour",
-            "latest_hour","winddown"
-        ])
-    expected = [
-        "name","cost","delta_energy","delta_hunger",
-        "base_utility","environment","earliest_hour",
-        "latest_hour","winddown"
-    ]
-    for c in expected:
-        if c not in df.columns:
-            df[c] = ""
+    """
+    Lê o arquivo activities.csv diretamente do RAW do GitHub.
+    """
+    df = pd.read_csv(RAW_CSV_URL)
+    expected = ["name","cost","delta_energy","delta_hunger","base_utility","environment","earliest_hour","latest_hour","winddown"]
     return df[expected]
+
+
+# ============================================================
+# ⚙️ Funções principais do modelo (MDP)
+# ============================================================
 
 MAX_ENERGY = 5
 MAX_HUNGER = 5
@@ -61,180 +91,251 @@ DECAY_FACTOR = 0.7
 WINDDOWN_PENALTY = 4.0
 WINDDOWN_WINDOW = 2
 
+
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
+
 def base_reward(act, state):
+    """
+    Cálculo da utilidade base da ação considerando:
+    - Energia
+    - Fome
+    - Preferência de ambiente
+    - Custo
+    """
     hour, energy, hunger, emotional, money, env_pref = state
-    base = float(act.get("base_utility", 0))
-    cost = float(act.get("cost", 0))
-    de = int(act.get("delta_energy", 0))
-    dh = int(act.get("delta_hunger", 0))
-    env = int(act.get("environment", 3))
-    r = base
+
+    try:
+        base = float(act["base_utility"])
+        cost = float(act["cost"])
+        de = int(act["delta_energy"])
+        dh = int(act["delta_hunger"])
+        env = int(act["environment"])
+    except:
+        return -999
+
+    reward = base
+
     if energy <= 1 and de < 0:
-        r -= 2.5
+        reward -= 2.5
+
     if hunger >= 3 and dh >= 0:
-        r -= 1.5
+        reward -= 1.5
+
     if cost > money:
-        r -= (cost - money)/50 + 5.0
+        reward -= (cost - money) / 50 + 5
+
     if env_pref != 3 and env != 3 and env != env_pref:
-        r -= 1.5
-    return r
+        reward -= 1.5
+
+    return reward
+
 
 def transition(state, act):
+    """
+    Transição de estado: aplica os efeitos da atividade.
+    """
     hour, energy, hunger, emotional, money, env_pref = state
-    new_hour = hour + 1
-    new_energy = clamp(energy + int(act.get("delta_energy", 0)), 0, MAX_ENERGY)
-    new_hunger = clamp(hunger + int(act.get("delta_hunger", 0)), 0, MAX_HUNGER)
-    new_money = max(0.0, money - float(act.get("cost", 0)))
-    return (new_hour, new_energy, new_hunger, emotional, new_money, env_pref)
+
+    return (
+        hour + 1,
+        clamp(energy + int(act["delta_energy"]), 0, MAX_ENERGY),
+        clamp(hunger + int(act["delta_hunger"]), 0, MAX_HUNGER),
+        emotional,
+        max(0, money - float(act["cost"])),
+        env_pref
+    )
+
+
+# ============================================================
+# 🧠 PROGRAMAÇÃO DINÂMICA (V)
+# Avalia todas as sequências possíveis até a hora de dormir.
+# Suporta:
+#  - Atividades obrigatórias contínuas
+#  - Penalização de repetição excessiva
+#  - Penalização para não-winddown antes de dormir
+# ============================================================
 
 @lru_cache(maxsize=None)
 def V(hour, energy, hunger, emotional, money, env_pref,
       sleep_hour, prev_idx, consec,
-      mand_idx_tuple, mand_rem_tuple,
+      mand_idx_tuple, mand_remaining_tuple,
       current_mand_pos, current_mand_consec):
 
+    # Caso terminal
     if hour >= sleep_hour:
-        if any(x > 0 for x in mand_rem_tuple):
+        if any(x > 0 for x in mand_remaining_tuple):
             return (-1e6, [])
-        return (0.0, [])
+        return (0, [])
 
-    activities = ACTIVITIES_LIST
-    remaining = sleep_hour - hour
-    total_mand = sum(mand_rem_tuple)
-
+    remaining_periods = sleep_hour - hour
+    total_mandatory_left = sum(mand_remaining_tuple)
     best_val = -1e9
     best_seq = []
 
+    # Se estivermos dentro de um bloco obrigatório contínuo:
     if current_mand_pos != -1:
         i = mand_idx_tuple[current_mand_pos]
-        act = activities[i]
+        act = ACTIVITIES_LIST[i]
         hour_mod = hour % 24
-        e0 = int(act["earliest_hour"])
-        e1 = int(act["latest_hour"])
-        if not (e0 <= hour_mod <= e1):
+
+        early = int(act["earliest_hour"])
+        late = int(act["latest_hour"])
+        if not (early <= hour_mod <= late):
             return (-1e6, [])
+
         if float(act["cost"]) > money:
             return (-1e6, [])
+
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
         r = base_r * (DECAY_FACTOR ** consec) if i == prev_idx else base_r
-        act_wind = str(act["winddown"]).lower() == "true"
-        if hour >= sleep_hour - WINDDOWN_WINDOW and not act_wind:
-            r -= WINDDOWN_PENALTY
-        mand_rem = list(mand_rem_tuple)
-        mand_rem[current_mand_pos] -= 1
-        next_pos = current_mand_pos if mand_rem[current_mand_pos] > 0 else -1
-        next_consec = current_mand_consec + 1 if next_pos != -1 else 0
-        nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
-        fv, fs = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
-                    sleep_hour, i, next_consec,
-                    mand_idx_tuple, tuple(mand_rem),
-                    next_pos, next_consec)
-        return (r + fv, [(hour, act["name"], r, float(act["cost"]))] + fs)
 
-    for i, act in enumerate(activities):
+        wind_ok = str(act["winddown"]).lower() == "true"
+        if hour >= sleep_hour - WINDDOWN_WINDOW and not wind_ok:
+            r -= WINDDOWN_PENALTY
+
+        mand_remaining = list(mand_remaining_tuple)
+        mand_remaining[current_mand_pos] -= 1
+
+        next_pos = current_mand_pos if mand_remaining[current_mand_pos] > 0 else -1
+        next_consec = current_mand_consec + 1 if next_pos != -1 else 0
+
+        s2 = transition((hour, energy, hunger, emotional, money, env_pref), act)
+        fv, seq = V(s2[0], s2[1], s2[2], s2[3], s2[4], s2[5],
+                    sleep_hour, i, next_consec,
+                    mand_idx_tuple, tuple(mand_remaining),
+                    next_pos, next_consec)
+
+        return (r + fv, [(hour, act["name"], r, float(act["cost"]))] + seq)
+
+    # Se NÃO estivermos dentro de um bloco obrigatório:
+    for i, act in enumerate(ACTIVITIES_LIST):
         hour_mod = hour % 24
-        e0 = int(act["earliest_hour"])
-        e1 = int(act["latest_hour"])
-        if not (e0 <= hour_mod <= e1):
+        early = int(act["earliest_hour"])
+        late = int(act["latest_hour"])
+        if not (early <= hour_mod <= late):
             continue
+
         if float(act["cost"]) > money:
             continue
 
         is_mand = False
         mand_pos = -1
-        for p, idx in enumerate(mand_idx_tuple):
+
+        for pos, idx in enumerate(mand_idx_tuple):
             if idx == i:
                 is_mand = True
-                mand_pos = p
+                mand_pos = pos
                 break
 
-        if total_mand > remaining:
+        if total_mandatory_left > remaining_periods:
             continue
-        if total_mand == remaining and not is_mand:
+
+        if total_mandatory_left == remaining_periods and not is_mand:
             continue
 
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
         r = base_r * (DECAY_FACTOR ** consec) if i == prev_idx else base_r
-        act_wind = str(act["winddown"]).lower() == "true"
-        if hour >= sleep_hour - WINDDOWN_WINDOW and not act_wind:
+
+        wind_ok = str(act["winddown"]).lower() == "true"
+        if hour >= sleep_hour - WINDDOWN_WINDOW and not wind_ok:
             r -= WINDDOWN_PENALTY
 
-        mand_rem = list(mand_rem_tuple)
+        mand_remaining = list(mand_remaining_tuple)
         next_pos = -1
-        next_consec = 0
+        next_consec_mand = 0
 
         if is_mand:
-            mand_rem[mand_pos] -= 1
-            if mand_rem[mand_pos] > 0:
+            mand_remaining[mand_pos] -= 1
+            if mand_remaining[mand_pos] > 0:
                 next_pos = mand_pos
-                next_consec = 1
+                next_consec_mand = 1
 
-        nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
-        fv, fs = V(nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
+        s2 = transition((hour, energy, hunger, emotional, money, env_pref), act)
+        fv, seq = V(s2[0], s2[1], s2[2], s2[3], s2[4], s2[5],
                     sleep_hour, i, (consec+1 if i==prev_idx else 1),
-                    mand_idx_tuple, tuple(mand_rem),
-                    next_pos, next_consec)
+                    mand_idx_tuple, tuple(mand_remaining),
+                    next_pos, next_consec_mand)
 
-        s = r + fv
-        if s > best_val:
-            best_val = s
-            best_seq = [(hour, act["name"], r, float(act["cost"]))] + fs
+        if r + fv > best_val:
+            best_val = r + fv
+            best_seq = [(hour, act["name"], r, float(act["cost"]))] + seq
 
     return (best_val, best_seq)
 
-def plot_states(seq, start_hour, sleep_hour, initial_state):
+
+# ============================================================
+# 📊 Gráfico de evolução de energia e fome
+# ============================================================
+
+def plot_states(seq, start_hour, initial_state):
     hours = []
-    ev = []
-    hv = []
+    E = []
+    H = []
+
     hour, energy, hunger, emo, money, env_pref = initial_state
+
     hours.append(hour)
-    ev.append(energy)
-    hv.append(hunger)
-    lookup = {a["name"]: a for a in ACTIVITIES_LIST}
-    for h, name, r, c in seq:
-        act = lookup.get(name)
+    E.append(energy)
+    H.append(hunger)
+
+    name_map = {a["name"]: a for a in ACTIVITIES_LIST}
+
+    for h, name, r, cost in seq:
+        act = name_map.get(name)
         if act:
             energy = clamp(energy + int(act["delta_energy"]), 0, MAX_ENERGY)
             hunger = clamp(hunger + int(act["delta_hunger"]), 0, MAX_HUNGER)
+
         hours.append(h+1)
-        ev.append(energy)
-        hv.append(hunger)
-    fig, ax = plt.subplots(figsize=(8,3))
-    ax.plot(hours, ev, marker='o', label="Energia")
-    ax.plot(hours, hv, marker='s', label="Fome")
+        E.append(energy)
+        H.append(hunger)
+
+    fig, ax = plt.subplots(figsize=(7,3))
+    ax.plot(hours, E, label="Energia")
+    ax.plot(hours, H, label="Fome")
     ax.legend()
-    plt.tight_layout()
     return fig
 
-def make_pdf_bytes(title, seq, total_util):
+
+# ============================================================
+# 📄 Exportação para PDF ou TXT
+# ============================================================
+
+def make_pdf_bytes(title, seq, total):
     try:
-        from reportlab.lib.pagesizes import A4
         from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import A4
         buf = BytesIO()
         c = canvas.Canvas(buf, pagesize=A4)
         w, h = A4
         c.setFont("Helvetica-Bold", 14)
         c.drawString(40, h-40, title)
-        c.setFont("Helvetica", 11)
-        c.drawString(40, h-60, f"Utilidade total: {total_util:.2f}")
-        y = h-100
-        for hora, nome, rec, custo in seq:
-            c.drawString(40, y, f"{hora}:00 → {nome} (U={rec:.2f}, R${custo:.2f})")
-            y -= 16
-            if y < 80:
+        c.setFont("Helvetica", 10)
+        c.drawString(40, h-60, f"Utilidade total: {total:.2f}")
+
+        y = h - 100
+        for hora, nome, r, custo in seq:
+            c.drawString(40, y, f"{hora}:00 → {nome}  (U={r:.2f}, R${custo:.2f})")
+            y -= 15
+            if y < 60:
                 c.showPage()
-                y = h-40
+                y = h - 40
+
         c.save()
         buf.seek(0)
         return buf.read(), "application/pdf", "planejamento.pdf"
+
     except:
-        txt = f"Utilidade total: {total_util:.2f}\n\n"
-        for hora, nome, rec, custo in seq:
-            txt += f"{hora}:00 → {nome} (U {rec:.2f}, R${custo:.2f})\n"
+        txt = "\n".join(f"{h}:00 → {n} (U={r:.2f}, R${c:.2f})"
+                        for h,n,r,c in seq)
         return txt.encode(), "text/plain", "planejamento.txt"
+
+
+# ============================================================
+# 🌟 INTERFACE PRINCIPAL
+# ============================================================
 
 st.set_page_config(page_title="Decisor de Rotina", layout="wide", page_icon="🔮")
 
@@ -242,13 +343,86 @@ st.title("🔮 DECISOR DE ROTINA — Planejamento Diário")
 
 tabs = st.tabs(["📅 Gerar planejamento", "🛠 Gerenciar atividades", "📋 Atividades cadastradas"])
 
+
+# ============================================================
+# TAB 1 — GERAR PLANEJAMENTO
+# ============================================================
+
 with tabs[0]:
     st.header("Defina seu estado atual")
+
     col1, col2, col3 = st.columns(3)
+
     with col1:
         start_hour = st.number_input("Hora atual (0-23)", 0, 23, 9)
         sleep_hour = st.number_input("Hora de dormir (0-23)", 0, 23, 23)
-        sleep_eff = sleep_hour + 24 if sleep_hour <= start_hour else sleep_hour
-        env_pref = st.selectbox("Ambiente preferido", (1,2,3),
+        sleep_effective = sleep_hour + 24 if sleep_hour <= start_hour else sleep_hour
+
+        env_pref = st.selectbox("Ambiente preferido",
+                                (1,2,3),
                                 format_func=lambda x: {1:"Dentro",2:"Fora",3:"Tanto faz"}[x])
+
     with col2:
+        energy = st.slider("Energia (0-5)", 0, 5, 3)
+        hunger = st.slider("Fome (0-5)", 0, 5, 2)
+
+    with col3:
+        emotional = st.slider("Estado emocional (0-5)", 0, 5, 3)
+        money = st.number_input("Dinheiro disponível (R$)", 0.0, 2000.0, 50.0)
+
+    st.markdown("---")
+
+    st.subheader("Atividades obrigatórias para hoje (blocos contínuos)")
+    df = load_activities_df()
+    ACTIVITIES_LIST = df.to_dict(orient="records")
+
+    names = df["name"].tolist()
+    mand_select = st.multiselect("Selecione atividades obrigatórias", names)
+
+    mand_hours = {}
+    for n in mand_select:
+        mand_hours[n] = st.number_input(
+            f"Horas contínuas para '{n}'", 1, 24, 1, key=f"mand_{n}"
+        )
+
+    if st.button("✨ Gerar planejamento ótimo"):
+        mand_idx = []
+        mand_rem = []
+        for name, hrs in mand_hours.items():
+            idx = next((i for i,a in enumerate(ACTIVITIES_LIST) if a["name"]==name), None)
+            if idx is not None:
+                mand_idx.append(idx)
+                mand_rem.append(hrs)
+
+        mand_idx_t = tuple(mand_idx)
+        mand_rem_t = tuple(mand_rem)
+
+        V.cache_clear()
+
+        total, seq = V(start_hour, energy, hunger, emotional, money, env_pref,
+                       sleep_effective, -1, 0,
+                       mand_idx_t, mand_rem_t, -1, 0)
+
+        if total < -1e5 or not seq:
+            st.error("Não foi possível gerar um planejamento viável.")
+        else:
+            st.subheader(f"Utilidade total: {total:.2f}")
+            for h,n,r,c in seq:
+                st.write(f"- {h}:00 → {n} (U={r:.2f}, R${c:.2f})")
+
+            fig = plot_states(seq, start_hour, (start_hour, energy, hunger, emotional, money, env_pref))
+            st.pyplot(fig)
+
+            content, mime, fname = make_pdf_bytes("Planejamento Diário", seq, total)
+            st.download_button("📥 Baixar planejamento", content, file_name=fname, mime=mime)
+
+
+# ============================================================
+# TAB 2 — GERENCIAR ATIVIDADES
+# ============================================================
+
+with tabs[1]:
+    st.header("Cadastrar nova atividade")
+
+    name = st.text_input("Nome da atividade")
+    cost = st.number_input("Custo_
