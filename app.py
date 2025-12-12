@@ -92,7 +92,6 @@ def load_user_activities():
                 df[col] = None
 
     df["max_hours"] = df["max_hours"].fillna(24)
-
     github_write_csv(FILE_PATH, df, f"{user_id}: corrigir colunas ausentes")
     return df
 
@@ -134,8 +133,7 @@ def transition(state, act):
 def V(hour, energy, hunger, emotional, money, env_pref,
       sleep_hour, prev_idx, consec,
       mand_idx_tuple, mand_rem_tuple,
-      current_mand_pos, current_mand_consec,
-      used_flags, usage_counts):
+      current_mand_pos, current_mand_consec):
 
     if hour >= sleep_hour:
         return (0.0, []) if all(x == 0 for x in mand_rem_tuple) else (-1e6, [])
@@ -155,7 +153,8 @@ def V(hour, energy, hunger, emotional, money, env_pref,
         if float(act["cost"]) > money:
             return (-1e6, [])
 
-        if usage_counts[idx] >= int(act["max_hours"]):
+        max_h = int(act.get("max_hours", 24))
+        if idx == prev_idx and consec >= max_h:
             return (-1e6, [])
 
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
@@ -169,26 +168,16 @@ def V(hour, energy, hunger, emotional, money, env_pref,
         next_pos = current_mand_pos if mand_rem[current_mand_pos] > 0 else -1
         next_consec = current_mand_consec + 1 if next_pos != -1 else 0
 
-        new_usage = list(usage_counts)
-        new_usage[idx] += 1
-
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
         fv, fs = V(
             nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
             sleep_hour, idx, next_consec,
             mand_idx_tuple, tuple(mand_rem),
-            next_pos, next_consec,
-            used_flags, tuple(new_usage)
+            next_pos, next_consec
         )
         return r + fv, [(hour, act["name"], r, float(act["cost"]))] + fs
 
     for i, act in enumerate(activities):
-
-        if used_flags[i] == 1:
-            continue
-
-        if usage_counts[i] >= int(act["max_hours"]):
-            continue
 
         hour_mod = hour % 24
         if not (int(act["earliest_hour"]) <= hour_mod <= int(act["latest_hour"])):
@@ -200,6 +189,10 @@ def V(hour, energy, hunger, emotional, money, env_pref,
         if total_mand > remaining:
             continue
         if total_mand == remaining and not is_mand:
+            continue
+
+        max_h = int(act.get("max_hours", 24))
+        if i == prev_idx and consec >= max_h:
             continue
 
         base_r = base_reward(act, (hour, energy, hunger, emotional, money, env_pref))
@@ -216,20 +209,12 @@ def V(hour, energy, hunger, emotional, money, env_pref,
                 next_pos = pos
                 next_consec = 1
 
-        new_used = list(used_flags)
-        if prev_idx != -1 and i != prev_idx:
-            new_used[prev_idx] = 1
-
-        new_usage = list(usage_counts)
-        new_usage[i] += 1
-
         nt = transition((hour, energy, hunger, emotional, money, env_pref), act)
         fv, fs = V(
             nt[0], nt[1], nt[2], nt[3], nt[4], nt[5],
             sleep_hour, i, (consec+1 if i==prev_idx else 1),
             mand_idx_tuple, tuple(mand_rem),
-            next_pos, next_consec,
-            tuple(new_used), tuple(new_usage)
+            next_pos, next_consec
         )
 
         total = r + fv
@@ -288,9 +273,7 @@ with tabs[0]:
             sleep_eff,
             -1, 0,
             tuple(mand_idx), tuple(mand_rem),
-            -1, 0,
-            tuple([0] * len(ACTIVITIES)),
-            tuple([0] * len(ACTIVITIES))
+            -1, 0
         )
 
         if total < -1e5:
